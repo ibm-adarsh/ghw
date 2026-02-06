@@ -44,6 +44,12 @@ func (i *Info) load(opts *option.Options) error {
 func processorsGet(opts *option.Options) []*Processor {
 	paths := linuxpath.New(opts)
 
+	// Check raw file for s390x indicators
+	if isS390xLayout(paths.ProcCpuinfo) {
+		return parseS390xCPUInfo(opts)
+	}
+
+	// Otherwise fall back to logicalProcessors parsing
 	lps := logicalProcessorsFromProcCPUInfo(opts)
 	// keyed by processor ID (physical_package_id)
 	procs := map[int]*Processor{}
@@ -99,6 +105,7 @@ func processorsGet(opts *option.Options) []*Processor {
 			} else if len(lp.Attrs["Features"]) != 0 { // ARM64
 				proc.Capabilities = strings.Split(lp.Attrs["Features"], " ")
 			}
+			// Model detection
 			if len(lp.Attrs["model name"]) != 0 {
 				proc.Model = lp.Attrs["model name"]
 			} else if len(lp.Attrs["Processor"]) != 0 { // ARM
@@ -110,6 +117,7 @@ func processorsGet(opts *option.Options) []*Processor {
 			} else if len(lp.Attrs["uarch"]) != 0 { // SiFive
 				proc.Model = lp.Attrs["uarch"]
 			}
+			// Vendor detection
 			if len(lp.Attrs["vendor_id"]) != 0 {
 				proc.Vendor = lp.Attrs["vendor_id"]
 			} else if len(lp.Attrs["isa"]) != 0 { // RISCV64
@@ -130,17 +138,14 @@ func processorsGet(opts *option.Options) []*Processor {
 				NumThreads: 1,
 			}
 			proc.Cores = append(proc.Cores, core)
-			proc.TotalCores += 1
-			// TODO(jaypipes): Remove NumCores before v1.0
-			proc.NumCores += 1
+			proc.TotalCores++
+			proc.NumCores++
 		} else {
-			core.TotalHardwareThreads += 1
-			// TODO(jaypipes) Remove NumThreads before v1.0
-			core.NumThreads += 1
+			core.TotalHardwareThreads++
+			core.NumThreads++
 		}
-		proc.TotalHardwareThreads += 1
-		// TODO(jaypipes) Remove NumThreads before v1.0
-		proc.NumThreads += 1
+		proc.TotalHardwareThreads++
+		proc.NumThreads++
 		core.LogicalProcessors = append(core.LogicalProcessors, lpID)
 	}
 	res := []*Processor{}
@@ -153,11 +158,91 @@ func processorsGet(opts *option.Options) []*Processor {
 	return res
 }
 
-// processorIDFromLogicalProcessorID returns the processor physical package ID
-// for the supplied logical processor ID
+// isS390xLayout checks if the logical processor attribute map lacks typical fields.
+// s390x /proc/cpuinfo often places vendor/model in global sections instead.
+func isS390xLayout(cpuinfoPath string) bool {
+	f, err := os.Open(cpuinfoPath)
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+
+	scanner := bufio.NewScanner(f)
+	sawVendor := false
+	sawNum := false
+
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		// check for real s390x identifiers
+		if strings.HasPrefix(line, "vendor_id") && strings.Contains(line, "IBM/S390") {
+			sawVendor = true
+		}
+		if strings.HasPrefix(line, "# processors") {
+			sawNum = true
+		}
+		// if we have seen both, it's s390x
+		if sawVendor && sawNum {
+			return true
+		}
+	}
+	return false
+}
+
+// parseS390xCPUInfo reads /proc/cpuinfo and constructs Processor info for s390x systems.
+func parseS390xCPUInfo(opts *option.Options) []*Processor {
+	paths := linuxpath.New(opts)
+	file, err := os.Open(paths.ProcCpuinfo)
+	if err != nil {
+		return []*Processor{}
+	}
+	defer util.SafeClose(file)
+
+	scanner := bufio.NewScanner(file)
+	var globalVendor string
+	var globalModel string
+	var procCount int
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if strings.HasPrefix(line, "vendor_id") {
+			parts := strings.SplitN(line, ":", 2)
+			if len(parts) == 2 {
+				globalVendor = strings.TrimSpace(parts[1])
+			}
+		}
+		if strings.HasPrefix(line, "machine") {
+			parts := strings.SplitN(line, ":", 2)
+			if len(parts) == 2 {
+				globalModel = strings.TrimSpace(parts[1])
+			}
+		}
+		if strings.HasPrefix(line, "# processors") {
+			parts := strings.SplitN(line, ":", 2)
+			if len(parts) == 2 {
+				procCount, _ = strconv.Atoi(strings.TrimSpace(parts[1]))
+			}
+		}
+	}
+
+	// Build a slice of Processors
+	out := []*Processor{}
+	for i := 0; i < procCount; i++ {
+		proc := &Processor{
+			ID:     i,
+			Vendor: globalVendor,
+			Model:  globalModel,
+		}
+		proc.TotalCores = 1
+		proc.TotalHardwareThreads = 1
+
+		out = append(out, proc)
+
+	}
+	return out
+}
+
+// processorIDFromLogicalProcessorID returns the physical package ID
 func processorIDFromLogicalProcessorID(opts *option.Options, lpID int) int {
 	paths := linuxpath.New(opts)
-	// Fetch CPU ID
 	path := filepath.Join(
 		paths.SysDevicesSystemCPU,
 		fmt.Sprintf("cpu%d", lpID),

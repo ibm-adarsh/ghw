@@ -177,3 +177,46 @@ func TestNumCoresAmongOfflineCPUs(t *testing.T) {
 		t.Fatalf("Unexpected warnings related to missing files under topology directory was raised")
 	}
 }
+
+func TestS390xCPU(t *testing.T) {
+	if _, ok := os.LookupEnv("GHW_TESTING_SKIP_CPU"); ok {
+		t.Skip("Skipping CPU tests.")
+	}
+
+	testdataPath, err := testdata.SnapshotsDirectory()
+	if err != nil {
+		t.Fatalf("Expected nil err, but got %v", err)
+	}
+
+	s390xSnapshot := filepath.Join(testdataPath, "linux-s390x-basic.tar.gz")
+
+	unpackDir := t.TempDir()
+	err = snapshot.UnpackInto(s390xSnapshot, unpackDir)
+	if err != nil {
+		t.Fatalf("failed to unpack snapshot: %v", err)
+	}
+
+	info, err := cpu.New(option.WithChroot(unpackDir))
+	if err != nil {
+		t.Fatalf("Expected nil err, but got %v", err)
+	}
+	if info == nil {
+		t.Fatalf("Expected non-nil CPUInfo, but got nil")
+	}
+
+	if len(info.Processors) == 0 {
+		t.Fatalf("Expected >0 processors but got 0")
+	}
+
+	for _, p := range info.Processors {
+		if p.Vendor == "" {
+			t.Fatalf("Expected not empty vendor for s390x")
+		}
+		if p.TotalCores == 0 {
+			t.Fatalf("Expected >0 cores but got 0")
+		}
+		if p.TotalHardwareThreads == 0 {
+			t.Fatalf("Expected >0 threads but got 0")
+		}
+	}
+}
