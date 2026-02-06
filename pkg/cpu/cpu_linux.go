@@ -249,65 +249,100 @@ func parseS390xCPUInfo(opts *option.Options) []*Processor {
 	if err != nil {
 		return []*Processor{}
 	}
-	defer util.SafeClose(file)
+	defer file.Close()
 
-	var vendor, model string
-	var procCount int
+	var globalVendor, globalModel string
+	// Map of physical_id -> Processor pointer
+	procsMap := make(map[int]*Processor)
 
+	// Temporary storage for block attributes
+	currentAttrs := make(map[string]string)
 	scanner := bufio.NewScanner(file)
+
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
+		if line == "" {
+			// When we hit a blank line, process the block we just finished
+			if cpuStr, ok := currentAttrs["cpu number"]; ok {
+				cpuNum, _ := strconv.Atoi(cpuStr)
+				physID, _ := strconv.Atoi(currentAttrs["physical id"])
+				coreID, _ := strconv.Atoi(currentAttrs["core id"])
 
-		// Vendor parsing with fallback
-		if strings.HasPrefix(line, "vendor_id") || strings.HasPrefix(line, "CPU implementer") {
-			parts := strings.SplitN(line, ":", 2)
-			if len(parts) == 2 {
-				v := strings.TrimSpace(parts[1])
-				if v != "" {
-					if strings.EqualFold(v, "IBM/S390") || strings.EqualFold(v, "0x41") {
-						vendor = "IBM/S390"
-					} else {
-						vendor = v
+				// 1. Get or Create the Physical Processor
+				p, exists := procsMap[physID]
+				if !exists {
+					p = &Processor{
+						ID:     physID,
+						Vendor: globalVendor,
+						Model:  globalModel,
+						Cores:  make([]*ProcessorCore, 0),
 					}
+					procsMap[physID] = p
 				}
+
+				// 2. Get or Create the Core within that Processor
+				core := p.CoreByID(coreID)
+				if core == nil {
+					core = &ProcessorCore{
+						ID:                coreID,
+						LogicalProcessors: []int{},
+					}
+					p.Cores = append(p.Cores, core)
+					p.TotalCores++
+					p.NumCores++ // Older ghw compat
+				}
+
+				// 3. Add the logical processor to the core and update counts
+				core.LogicalProcessors = append(core.LogicalProcessors, cpuNum)
+				core.TotalHardwareThreads++
+				core.NumThreads++ // Older ghw compat
+
+				p.TotalHardwareThreads++
+				p.NumThreads++ // Older ghw compat
 			}
+			currentAttrs = make(map[string]string)
+			continue
 		}
 
-		// Model parsing
-		if strings.HasPrefix(line, "machine") || strings.HasPrefix(line, "cpu model") {
-			parts := strings.SplitN(line, ":", 2)
-			if len(parts) == 2 {
-				model = strings.TrimSpace(parts[1])
-			}
+		// Capture global identifiers found at the top/bottom of the file
+		if strings.HasPrefix(line, "vendor_id") {
+			globalVendor = strings.TrimSpace(strings.SplitN(line, ":", 2)[1])
+		} else if strings.HasPrefix(line, "machine") {
+			globalModel = strings.TrimSpace(strings.SplitN(line, ":", 2)[1])
 		}
 
-		// Processor count
-		if strings.HasPrefix(line, "# processors") {
-			parts := strings.SplitN(line, ":", 2)
-			if len(parts) == 2 {
-				procCount, _ = strconv.Atoi(strings.TrimSpace(parts[1]))
-			}
+		// Store attributes for the current "cpu number" block
+		parts := strings.SplitN(line, ":", 2)
+		if len(parts) == 2 {
+			currentAttrs[strings.TrimSpace(parts[0])] = strings.TrimSpace(parts[1])
 		}
 	}
 
-	// Build the Processor slice
-	out := make([]*Processor, 0, procCount)
-	for i := 0; i < procCount; i++ {
-		out = append(out, &Processor{
-			ID:                   i,
-			Vendor:               vendor,
-			Model:                model,
-			TotalCores:           1,
-			TotalHardwareThreads: 1,
-		})
+	// Convert map to slice and sort for stable output
+	res := make([]*Processor, 0, len(procsMap))
+	for _, p := range procsMap {
+		// Fill in model/vendor if they were only found at the end of the file
+		if p.Model == "" {
+			p.Model = globalModel
+		}
+		if p.Vendor == "" {
+			p.Vendor = globalVendor
+		}
+		res = append(res, p)
 	}
 
-	return out
+	sort.Slice(res, func(i, j int) bool {
+		return res[i].ID < res[j].ID
+	})
+
+	return res
 }
 
-// processorIDFromLogicalProcessorID returns the physical package ID
+// processorIDFromLogicalProcessorID returns the processor physical package ID
+// for the supplied logical processor ID
 func processorIDFromLogicalProcessorID(opts *option.Options, lpID int) int {
 	paths := linuxpath.New(opts)
+	// Fetch CPU ID
 	path := filepath.Join(
 		paths.SysDevicesSystemCPU,
 		fmt.Sprintf("cpu%d", lpID),
