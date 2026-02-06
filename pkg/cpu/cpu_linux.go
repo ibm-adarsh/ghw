@@ -158,8 +158,8 @@ func processorsGet(opts *option.Options) []*Processor {
 	return res
 }
 
-// isS390xLayout checks if the logical processor attribute map lacks typical fields.
-// s390x /proc/cpuinfo often places vendor/model in global sections instead.
+// isS390xLayout checks if /proc/cpuinfo is in s390x format.
+// s390x often places vendor/model in global sections.
 func isS390xLayout(cpuinfoPath string) bool {
 	f, err := os.Open(cpuinfoPath)
 	if err != nil {
@@ -188,6 +188,60 @@ func isS390xLayout(cpuinfoPath string) bool {
 	return false
 }
 
+// Example /proc/cpuinfo output on an s390x system:
+//
+// [root@ logs]# cat /proc/cpuinfo
+// vendor_id       : IBM/S390
+// # processors    : 38
+// bogomips per cpu: 28901.00
+// max thread id   : 1
+// features        : esan3 zarch stfle msa ldisp eimm dfp edat etf3eh highgprs te vx vxd vxe gs vxe2 vxp sort dflt vxp2 nnpa pcimio sie
+// facilities      : 0 1 2 3 4 6 7 8 9 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 30 31 32 33 34 35 36 37 38 40 41 42 43 44 45 46 47 48 49 50 51 52 53 54 55 57 58 59 60 61 64 65 66 67 68 69 70 71 72 73 75 76 77 78 80 81 82 84 85 86 87 129 130 131 132 133 134 135 138 139 141 142 144 145 146 148 149 150 151 152 153 155 156 158 165 170 192 193 194 196 197 198 199 200 201
+// cache0          : level=1 type=Data scope=Private size=128K line_size=256 associativity=8
+// cache1          : level=1 type=Instruction scope=Private size=128K line_size=256 associativity=8
+// cache2          : level=2 type=Unified scope=Private size=36864K line_size=256 associativity=18
+// cache3          : level=3 type=Unified scope=Shared size=368640K line_size=256 associativity=180
+// processor 0: version = 00,  identification = 271F08,  machine = 9175
+// processor 1: version = 00,  identification = 271F08,  machine = 9175
+// processor 2: version = 00,  identification = 271F08,  machine = 9175
+// ...
+// processor 37: version = 00,  identification = 271F08,  machine = 9175
+//
+// cpu number      : 0
+// physical id     : 2
+// core id         : 0
+// book id         : 2
+// drawer id       : 2
+// dedicated       : 0
+// address         : 0
+// siblings        : 12
+// cpu cores       : 6
+// version         : 00
+// identification  : 271F08
+// machine         : 9175
+// cpu MHz dynamic : 5508
+// cpu MHz static  : 5508
+//
+// cpu number      : 1
+// physical id     : 2
+// core id         : 0
+// book id         : 2
+// drawer id       : 2
+// dedicated       : 0
+// address         : 1
+// siblings        : 12
+// cpu cores       : 6
+// version         : 00
+// identification  : 271F08
+// machine         : 9175
+// cpu MHz dynamic : 5508
+// cpu MHz static  : 5508
+//
+// cpu number      : 2
+// .
+// .
+//
+
 // parseS390xCPUInfo reads /proc/cpuinfo and constructs Processor info for s390x systems.
 func parseS390xCPUInfo(opts *option.Options) []*Processor {
 	paths := linuxpath.New(opts)
@@ -197,24 +251,37 @@ func parseS390xCPUInfo(opts *option.Options) []*Processor {
 	}
 	defer util.SafeClose(file)
 
-	scanner := bufio.NewScanner(file)
-	var globalVendor string
-	var globalModel string
+	var vendor, model string
 	var procCount int
+
+	scanner := bufio.NewScanner(file)
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
-		if strings.HasPrefix(line, "vendor_id") {
+
+		// Vendor parsing with fallback
+		if strings.HasPrefix(line, "vendor_id") || strings.HasPrefix(line, "CPU implementer") {
 			parts := strings.SplitN(line, ":", 2)
 			if len(parts) == 2 {
-				globalVendor = strings.TrimSpace(parts[1])
+				v := strings.TrimSpace(parts[1])
+				if v != "" {
+					if strings.EqualFold(v, "IBM/S390") || strings.EqualFold(v, "0x41") {
+						vendor = "IBM/S390"
+					} else {
+						vendor = v
+					}
+				}
 			}
 		}
-		if strings.HasPrefix(line, "machine") {
+
+		// Model parsing
+		if strings.HasPrefix(line, "machine") || strings.HasPrefix(line, "cpu model") {
 			parts := strings.SplitN(line, ":", 2)
 			if len(parts) == 2 {
-				globalModel = strings.TrimSpace(parts[1])
+				model = strings.TrimSpace(parts[1])
 			}
 		}
+
+		// Processor count
 		if strings.HasPrefix(line, "# processors") {
 			parts := strings.SplitN(line, ":", 2)
 			if len(parts) == 2 {
@@ -223,20 +290,18 @@ func parseS390xCPUInfo(opts *option.Options) []*Processor {
 		}
 	}
 
-	// Build a slice of Processors
-	out := []*Processor{}
+	// Build the Processor slice
+	out := make([]*Processor, 0, procCount)
 	for i := 0; i < procCount; i++ {
-		proc := &Processor{
-			ID:     i,
-			Vendor: globalVendor,
-			Model:  globalModel,
-		}
-		proc.TotalCores = 1
-		proc.TotalHardwareThreads = 1
-
-		out = append(out, proc)
-
+		out = append(out, &Processor{
+			ID:                   i,
+			Vendor:               vendor,
+			Model:                model,
+			TotalCores:           1,
+			TotalHardwareThreads: 1,
+		})
 	}
+
 	return out
 }
 
