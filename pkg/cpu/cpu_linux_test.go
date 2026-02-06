@@ -188,6 +188,7 @@ func TestS390xCPU(t *testing.T) {
 		t.Fatalf("Expected nil err, but got %v", err)
 	}
 
+	// Ensure this snapshot exists in your testdata/snapshots directory
 	s390xSnapshot := filepath.Join(testdataPath, "linux-s390x-basic.tar.gz")
 
 	unpackDir := t.TempDir()
@@ -200,23 +201,40 @@ func TestS390xCPU(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Expected nil err, but got %v", err)
 	}
-	if info == nil {
-		t.Fatalf("Expected non-nil CPUInfo, but got nil")
-	}
 
+	// Assertions
 	if len(info.Processors) == 0 {
 		t.Fatalf("Expected >0 processors but got 0")
 	}
 
+	// Verify the total counts are aggregated correctly from the grouping logic
+	if info.TotalCores == 0 {
+		t.Fatal("Expected total cores > 0")
+	}
+	if info.TotalHardwareThreads == 0 {
+		t.Fatal("Expected total hardware threads > 0")
+	}
+
 	for _, p := range info.Processors {
-		if p.Vendor == "" {
-			t.Fatalf("Expected not empty vendor for s390x")
+		if !strings.Contains(p.Vendor, "IBM") && p.Vendor != "IBM/S390" {
+			t.Errorf("Expected s390x vendor (IBM), but got: %s", p.Vendor)
 		}
 		if p.TotalCores == 0 {
-			t.Fatalf("Expected >0 cores but got 0")
+			t.Errorf("Processor %d reported 0 cores", p.ID)
 		}
 		if p.TotalHardwareThreads == 0 {
-			t.Fatalf("Expected >0 threads but got 0")
+			t.Errorf("Processor %d reported 0 hardware threads", p.ID)
+		}
+		// S390x should have features mapped to capabilities
+		if len(p.Capabilities) == 0 {
+			t.Errorf("Processor %d reported 0 capabilities (features)", p.ID)
+		}
+
+		// Deep topology check
+		for _, core := range p.Cores {
+			if len(core.LogicalProcessors) == 0 {
+				t.Errorf("Core %d in Processor %d has no logical processors", core.ID, p.ID)
+			}
 		}
 	}
 }

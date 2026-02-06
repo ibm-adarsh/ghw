@@ -252,35 +252,41 @@ func parseS390xCPUInfo(opts *option.Options) []*Processor {
 	defer file.Close()
 
 	var globalVendor, globalModel string
-	// Map of physical_id -> Processor pointer
+	var globalCaps []string
+
+	// procsMap groups multiple logical CPUs into a single physical package.
+	// Key is the 'physical id' from /proc/cpuinfo.
 	procsMap := make(map[int]*Processor)
 
-	// Temporary storage for block attributes
+	// currentAttrs buffers the key-value pairs of the CPU block currently being read.
 	currentAttrs := make(map[string]string)
 	scanner := bufio.NewScanner(file)
 
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
+
+		// S390x /proc/cpuinfo uses blank lines to separate logical CPU blocks.
 		if line == "" {
-			// When we hit a blank line, process the block we just finished
+			// If we have collected attributes, process them now.
 			if cpuStr, ok := currentAttrs["cpu number"]; ok {
 				cpuNum, _ := strconv.Atoi(cpuStr)
 				physID, _ := strconv.Atoi(currentAttrs["physical id"])
 				coreID, _ := strconv.Atoi(currentAttrs["core id"])
 
-				// 1. Get or Create the Physical Processor
+				// 1. Ensure the Physical Processor (Socket/Package) exists.
 				p, exists := procsMap[physID]
 				if !exists {
 					p = &Processor{
-						ID:     physID,
-						Vendor: globalVendor,
-						Model:  globalModel,
-						Cores:  make([]*ProcessorCore, 0),
+						ID:           physID,
+						Vendor:       globalVendor,
+						Model:        globalModel,
+						Capabilities: globalCaps,
+						Cores:        make([]*ProcessorCore, 0),
 					}
 					procsMap[physID] = p
 				}
 
-				// 2. Get or Create the Core within that Processor
+				// 2. Ensure the Physical Core exists within this Processor.
 				core := p.CoreByID(coreID)
 				if core == nil {
 					core = &ProcessorCore{
@@ -288,53 +294,61 @@ func parseS390xCPUInfo(opts *option.Options) []*Processor {
 						LogicalProcessors: []int{},
 					}
 					p.Cores = append(p.Cores, core)
-					p.TotalCores++
-					p.NumCores++ // Older ghw compat
+					p.TotalCores++ // Increment the count of physical cores
+					p.NumCores++   // Legacy field support
 				}
 
-				// 3. Add the logical processor to the core and update counts
+				// 3. Register the Logical Processor (Thread) to this Core.
 				core.LogicalProcessors = append(core.LogicalProcessors, cpuNum)
+
+				// Increment thread counters at both Core and Processor levels.
 				core.TotalHardwareThreads++
-				core.NumThreads++ // Older ghw compat
+				core.NumThreads++
 
 				p.TotalHardwareThreads++
-				p.NumThreads++ // Older ghw compat
+				p.NumThreads++
 			}
+			// Clear the buffer for the next CPU block.
 			currentAttrs = make(map[string]string)
 			continue
 		}
 
-		// Capture global identifiers found at the top/bottom of the file
+		// Capture global attributes that apply to all CPUs.
+		// These are often at the very top or very bottom of the file.
 		if strings.HasPrefix(line, "vendor_id") {
 			globalVendor = strings.TrimSpace(strings.SplitN(line, ":", 2)[1])
 		} else if strings.HasPrefix(line, "machine") {
 			globalModel = strings.TrimSpace(strings.SplitN(line, ":", 2)[1])
+		} else if strings.HasPrefix(line, "features") {
+			val := strings.TrimSpace(strings.SplitN(line, ":", 2)[1])
+			globalCaps = strings.Fields(val) // Split space-separated feature flags
 		}
 
-		// Store attributes for the current "cpu number" block
+		// Standard key: value parsing for the current block.
 		parts := strings.SplitN(line, ":", 2)
 		if len(parts) == 2 {
 			currentAttrs[strings.TrimSpace(parts[0])] = strings.TrimSpace(parts[1])
 		}
 	}
 
-	// Convert map to slice and sort for stable output
+	// Convert our grouping map into a sorted slice for the final result.
 	res := make([]*Processor, 0, len(procsMap))
 	for _, p := range procsMap {
-		// Fill in model/vendor if they were only found at the end of the file
+		// Final fallback: if vendor/model weren't in the block, use the globals.
 		if p.Model == "" {
 			p.Model = globalModel
 		}
 		if p.Vendor == "" {
 			p.Vendor = globalVendor
 		}
+		if len(p.Capabilities) == 0 {
+			p.Capabilities = globalCaps
+		}
 		res = append(res, p)
 	}
 
-	sort.Slice(res, func(i, j int) bool {
-		return res[i].ID < res[j].ID
-	})
-
+	// Sort by ID so Processor 0 comes before Processor 1, etc.
+	sort.Slice(res, func(i, j int) bool { return res[i].ID < res[j].ID })
 	return res
 }
 
