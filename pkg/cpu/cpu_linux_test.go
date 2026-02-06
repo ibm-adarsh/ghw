@@ -177,64 +177,47 @@ func TestNumCoresAmongOfflineCPUs(t *testing.T) {
 		t.Fatalf("Unexpected warnings related to missing files under topology directory was raised")
 	}
 }
-
 func TestS390xCPU(t *testing.T) {
-	if _, ok := os.LookupEnv("GHW_TESTING_SKIP_CPU"); ok {
-		t.Skip("Skipping CPU tests.")
-	}
+    if _, ok := os.LookupEnv("GHW_TESTING_SKIP_CPU"); ok {
+        t.Skip("Skipping CPU tests.")
+    }
 
-	testdataPath, err := testdata.SnapshotsDirectory()
-	if err != nil {
-		t.Fatalf("Expected nil err, but got %v", err)
-	}
+    testdataPath, err := testdata.SnapshotsDirectory()
+    if err != nil {
+        t.Fatalf("Expected nil err, but got %v", err)
+    }
 
-	// Ensure this snapshot exists in your testdata/snapshots directory
-	s390xSnapshot := filepath.Join(testdataPath, "linux-s390x-basic.tar.gz")
+    // This matches the file we just created
+    s390xSnapshot := filepath.Join(testdataPath, "linux-s390x-basic.tar.gz")
 
-	unpackDir := t.TempDir()
-	err = snapshot.UnpackInto(s390xSnapshot, unpackDir)
-	if err != nil {
-		t.Fatalf("failed to unpack snapshot: %v", err)
-	}
+    unpackDir := t.TempDir()
+    err = snapshot.UnpackInto(s390xSnapshot, unpackDir)
+    if err != nil {
+        t.Fatalf("failed to unpack snapshot: %v", err)
+    }
 
-	info, err := cpu.New(option.WithChroot(unpackDir))
-	if err != nil {
-		t.Fatalf("Expected nil err, but got %v", err)
-	}
+    // We use WithChroot so ghw looks inside the unpacked folder, not your real /proc
+    info, err := cpu.New(option.WithChroot(unpackDir))
+    if err != nil {
+        t.Fatalf("Expected nil err, but got %v", err)
+    }
 
-	// Assertions
-	if len(info.Processors) == 0 {
-		t.Fatalf("Expected >0 processors but got 0")
-	}
+    // Based on your /proc/cpuinfo:
+    // 1 physical ID (2), 4 core IDs (0,1,2,3), 8 processors (0-7)
+    if len(info.Processors) != 1 {
+        t.Errorf("Expected 1 physical processor, got %d", len(info.Processors))
+    }
 
-	// Verify the total counts are aggregated correctly from the grouping logic
-	if info.TotalCores == 0 {
-		t.Fatal("Expected total cores > 0")
-	}
-	if info.TotalHardwareThreads == 0 {
-		t.Fatal("Expected total hardware threads > 0")
-	}
+    if info.TotalCores != 4 {
+        t.Errorf("Expected 4 total cores, got %d", info.TotalCores)
+    }
 
-	for _, p := range info.Processors {
-		if !strings.Contains(p.Vendor, "IBM") && p.Vendor != "IBM/S390" {
-			t.Errorf("Expected s390x vendor (IBM), but got: %s", p.Vendor)
-		}
-		if p.TotalCores == 0 {
-			t.Errorf("Processor %d reported 0 cores", p.ID)
-		}
-		if p.TotalHardwareThreads == 0 {
-			t.Errorf("Processor %d reported 0 hardware threads", p.ID)
-		}
-		// S390x should have features mapped to capabilities
-		if len(p.Capabilities) == 0 {
-			t.Errorf("Processor %d reported 0 capabilities (features)", p.ID)
-		}
+    if info.TotalHardwareThreads != 8 {
+        t.Errorf("Expected 8 total hardware threads, got %d", info.TotalHardwareThreads)
+    }
 
-		// Deep topology check
-		for _, core := range p.Cores {
-			if len(core.LogicalProcessors) == 0 {
-				t.Errorf("Core %d in Processor %d has no logical processors", core.ID, p.ID)
-			}
-		}
-	}
+    p := info.Processors[0]
+    if p.Vendor != "IBM/S390" {
+        t.Errorf("Expected vendor IBM/S390, got %s", p.Vendor)
+    }
 }

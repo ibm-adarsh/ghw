@@ -253,105 +253,105 @@ func parseS390xCPUInfo(opts *option.Options) []*Processor {
 
 	var globalVendor, globalModel string
 	var globalCaps []string
-
-	// procsMap groups multiple logical CPUs into a single physical package.
-	// Key is the 'physical id' from /proc/cpuinfo.
 	procsMap := make(map[int]*Processor)
-
-	// currentAttrs buffers the key-value pairs of the CPU block currently being read.
 	currentAttrs := make(map[string]string)
-	scanner := bufio.NewScanner(file)
 
+	// processBlock handles the logic for a single "cpu number" section.
+	// We use a closure so we can call it inside the loop AND at EOF.
+	processBlock := func(attrs map[string]string) {
+		cpuStr, hasNum := attrs["cpu number"]
+		physStr, hasPhys := attrs["physical id"]
+		coreStr, hasCore := attrs["core id"]
+
+		if hasNum && hasPhys && hasCore {
+			cpuNum, _ := strconv.Atoi(cpuStr)
+			physID, _ := strconv.Atoi(physStr)
+			coreID, _ := strconv.Atoi(coreStr)
+
+			// 1. Find or create the Physical Processor (Package)
+			p, exists := procsMap[physID]
+			if !exists {
+				p = &Processor{
+					ID:           physID,
+					Vendor:       globalVendor,
+					Model:        globalModel,
+					Capabilities: globalCaps,
+					Cores:        make([]*ProcessorCore, 0),
+				}
+				procsMap[physID] = p
+			}
+
+			// 2. Find or create the Core within that Processor
+			core := p.CoreByID(coreID)
+			if core == nil {
+				core = &ProcessorCore{
+					ID:                coreID,
+					LogicalProcessors: []int{},
+				}
+				p.Cores = append(p.Cores, core)
+				p.TotalCores++
+				p.NumCores++
+			}
+
+			// 3. Add logical thread and update all counters
+			core.LogicalProcessors = append(core.LogicalProcessors, cpuNum)
+			core.TotalHardwareThreads++
+			core.NumThreads++
+			p.TotalHardwareThreads++
+			p.NumThreads++
+		}
+	}
+
+	scanner := bufio.NewScanner(file)
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
 
-		// S390x /proc/cpuinfo uses blank lines to separate logical CPU blocks.
+		// S390x uses empty lines to separate CPU sections
 		if line == "" {
-			// If we have collected attributes, process them now.
-			if cpuStr, ok := currentAttrs["cpu number"]; ok {
-				cpuNum, _ := strconv.Atoi(cpuStr)
-				physID, _ := strconv.Atoi(currentAttrs["physical id"])
-				coreID, _ := strconv.Atoi(currentAttrs["core id"])
-
-				// 1. Ensure the Physical Processor (Socket/Package) exists.
-				p, exists := procsMap[physID]
-				if !exists {
-					p = &Processor{
-						ID:           physID,
-						Vendor:       globalVendor,
-						Model:        globalModel,
-						Capabilities: globalCaps,
-						Cores:        make([]*ProcessorCore, 0),
-					}
-					procsMap[physID] = p
-				}
-
-				// 2. Ensure the Physical Core exists within this Processor.
-				core := p.CoreByID(coreID)
-				if core == nil {
-					core = &ProcessorCore{
-						ID:                coreID,
-						LogicalProcessors: []int{},
-					}
-					p.Cores = append(p.Cores, core)
-					p.TotalCores++ // Increment the count of physical cores
-					p.NumCores++   // Legacy field support
-				}
-
-				// 3. Register the Logical Processor (Thread) to this Core.
-				core.LogicalProcessors = append(core.LogicalProcessors, cpuNum)
-
-				// Increment thread counters at both Core and Processor levels.
-				core.TotalHardwareThreads++
-				core.NumThreads++
-
-				p.TotalHardwareThreads++
-				p.NumThreads++
+			if len(currentAttrs) > 0 {
+				processBlock(currentAttrs)
+				currentAttrs = make(map[string]string)
 			}
-			// Clear the buffer for the next CPU block.
-			currentAttrs = make(map[string]string)
 			continue
 		}
 
-		// Capture global attributes that apply to all CPUs.
-		// These are often at the very top or very bottom of the file.
+		// Collect Global Info (usually at top of file)
 		if strings.HasPrefix(line, "vendor_id") {
 			globalVendor = strings.TrimSpace(strings.SplitN(line, ":", 2)[1])
 		} else if strings.HasPrefix(line, "machine") {
 			globalModel = strings.TrimSpace(strings.SplitN(line, ":", 2)[1])
-		} else if strings.HasPrefix(line, "features") {
+		} else if strings.HasPrefix(line, "features") || strings.HasPrefix(line, "facilities") {
 			val := strings.TrimSpace(strings.SplitN(line, ":", 2)[1])
-			globalCaps = strings.Fields(val) // Split space-separated feature flags
+			globalCaps = append(globalCaps, strings.Fields(val)...)
 		}
 
-		// Standard key: value parsing for the current block.
+		// Collect Block-level Info
 		parts := strings.SplitN(line, ":", 2)
 		if len(parts) == 2 {
 			currentAttrs[strings.TrimSpace(parts[0])] = strings.TrimSpace(parts[1])
 		}
 	}
 
-	// Convert our grouping map into a sorted slice for the final result.
+	//  Process the last block if file didn't end with a blank line
+	if len(currentAttrs) > 0 {
+		processBlock(currentAttrs)
+	}
+
+	// Prepare results and sort for consistency
 	res := make([]*Processor, 0, len(procsMap))
 	for _, p := range procsMap {
-		// Final fallback: if vendor/model weren't in the block, use the globals.
-		if p.Model == "" {
-			p.Model = globalModel
-		}
-		if p.Vendor == "" {
-			p.Vendor = globalVendor
-		}
-		if len(p.Capabilities) == 0 {
-			p.Capabilities = globalCaps
-		}
+		if p.Model == "" { p.Model = globalModel }
+		if p.Vendor == "" { p.Vendor = globalVendor }
+		if len(p.Capabilities) == 0 { p.Capabilities = globalCaps }
 		res = append(res, p)
 	}
 
-	// Sort by ID so Processor 0 comes before Processor 1, etc.
-	sort.Slice(res, func(i, j int) bool { return res[i].ID < res[j].ID })
+	sort.Slice(res, func(i, j int) bool {
+		return res[i].ID < res[j].ID
+	})
+
 	return res
 }
-
 // processorIDFromLogicalProcessorID returns the processor physical package ID
 // for the supplied logical processor ID
 func processorIDFromLogicalProcessorID(opts *option.Options, lpID int) int {
